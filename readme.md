@@ -75,3 +75,43 @@ cesfam-santa-rosa/
 ├── database/
 │   └── backup_cesfam.sql           # Respaldo SQL completo con datos base
 └── README.md                       # Documentación técnica del proyecto
+
+Crear la base de datos vacía en PostgreSQL:
+
+PowerShell
+& "C:\Program Files\PostgreSQL\16\bin\psql.exe" -U postgres -c "CREATE DATABASE cesfam_santarosa;"
+Ejecutar la creación de esquemas y roles semilla:
+
+PowerShell
+python init_db.py
+Crear el usuario administrador inicial:
+
+PowerShell
+python seed_admin.py
+Paso 4: Ejecución del Servidor Backend
+Levantar el servidor ASGI con recarga automática:
+
+PowerShell
+uvicorn main:app --reload
+Verificar la disponibilidad en el navegador:
+
+Estado de Salud de la API: http://127.0.0.1:8000/
+
+Documentación Interactiva Swagger UI: http://127.0.0.1:8000/docs
+
+Documentación Alternativa Redoc: http://127.0.0.1:8000/redoc
+
+🔐 Credenciales de Prueba y Verificación
+Para probar las rutas protegidas en Swagger UI (/docs):
+
+Hacer clic en el botón superior Authorize (candado verde).
+
+Ingresar las siguientes credenciales:
+
+Username: admin@cesfam.cl
+
+Password: admin1234
+
+Presionar Authorize y luego Close.
+
+Ejecutar la ruta GET /api/v1/auth/me para verificar la respuesta HTTP 200 OK con el perfil autenticado.
