@@ -1,0 +1,23 @@
+backend/
+├── app/
+│   ├── api/
+│   │   ├── endpoints/
+│   │   │   ├── auth.py          # Rutas de autenticación y sesiones
+│   │   │   ├── dashboard.py     # Rutas para métricas y gráficos
+│   │   │   ├── metas.py         # Rutas para gestión de metas anuales
+│   │   │   └── rem.py           # Rutas para ingesta Excel y celdas
+│   │   └── router.py            # Consolidador de endpoints en /api/v1
+│   ├── core/
+│   │   ├── config.py            # Variables de entorno (.env)
+│   │   └── security.py          # Hash bcrypt y manejo de tokens JWT
+│   ├── db/
+│   │   ├── base.py              # Clase Base declarativa de SQLAlchemy
+│   │   └── session.py           # Engine y generador de sesiones PostgreSQL
+│   ├── models/
+│   │   ├── __init__.py          # Exportación de modelos
+│   │   └── entities.py          # 8 tablas relacionales del CESFAM
+│   └── schemas/                 # Validación de entrada/salida (Pydantic)
+├── .env                         # Variables de entorno locales
+├── init_db.py                   # Script de creación y siembra de tablas
+├── main.py                      # Punto de entrada de la aplicación FastAPI
+└── requirements.txt             # Lista de dependencias del proyecto
