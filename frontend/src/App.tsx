@@ -8,11 +8,15 @@ import {
   ShieldCheck, 
   LogOut, 
   CheckCircle2, 
+  AlertCircle,
   Plus, 
   Sliders, 
   Lock,
-  UserCheck
+  UserCheck,
+  Download
 } from 'lucide-react';
+
+const API_URL = 'http://127.0.0.1:8000/api/v1';
 
 interface Meta {
   id_meta: number;
@@ -34,72 +38,230 @@ interface Parametro {
   celda_coordenada: string;
 }
 
+interface AuditoriaItem {
+  id_auditoria: number;
+  id_usuario: number;
+  accion: string;
+  tabla_modificada: string;
+  id_registro_afectado: number;
+  fecha_hora: string;
+}
+
+function parseJwtRole(token: string | null): string {
+  if (!token) return 'Usuario';
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    return payload.rol || 'Gestor de Informacion';
+  } catch {
+    return 'Gestor de Informacion';
+  }
+}
+
 export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem('access_token'));
-  const [userRole, setUserRole] = useState<string>('Gestor de Información');
+  const [userRole, setUserRole] = useState<string>(() => parseJwtRole(localStorage.getItem('access_token')));
   const [currentTab, setCurrentTab] = useState<'dashboard' | 'metas' | 'parametros' | 'rem' | 'auditoria'>('dashboard');
 
   // Login State
   const [email, setEmail] = useState('admin@cesfam.cl');
-  const [password, setPassword] = useState('admin123');
+  const [password, setPassword] = useState('admin1234');
+  const [loginError, setLoginError] = useState<string>('');
+  const [loading, setLoading] = useState<boolean>(false);
 
-  // Data States
-  const [metas, setMetas] = useState<Meta[]>([
-    { id_meta: 1, id_programa: 1, anio: 2026, nombre_meta: 'Cobertura de Control Salud Infantil', ponderador: 25.0, meta_esperada: 90.0, actual: 88.5 },
-    { id_meta: 2, id_programa: 1, anio: 2026, nombre_meta: 'Evaluación del Desarrollo Psicomotor en Niños', ponderador: 20.0, meta_esperada: 85.0, actual: 92.1 },
-    { id_meta: 3, id_programa: 2, anio: 2026, nombre_meta: 'Efectividad en Cobertura de Pacientes Hipertensos', ponderador: 30.0, meta_esperada: 75.0, actual: 64.2 },
-  ]);
-
-  const [parametros, setParametros] = useState<Parametro[]>([
-    { id_parametro: 1, id_meta: 1, codigo_indicador: 'IND-01-NUM', descripcion: 'Niños con control al día', rem_codigo: 'REM-P01', nombre_hoja: 'Seccion_A', celda_coordenada: 'D24' },
-    { id_parametro: 2, id_meta: 1, codigo_indicador: 'IND-01-DEN', descripcion: 'Población bajo control inscrita', rem_codigo: 'REM-P01', nombre_hoja: 'Seccion_A', celda_coordenada: 'D10' },
-  ]);
+  // Data States (100% desde PostgreSQL)
+  const [metas, setMetas] = useState<Meta[]>([]);
+  const [parametros, setParametros] = useState<Parametro[]>([]);
+  const [auditoria, setAuditoria] = useState<AuditoriaItem[]>([]);
 
   // Form States
   const [newMeta, setNewMeta] = useState({ id_programa: 1, anio: 2026, nombre_meta: '', ponderador: 20, meta_esperada: 85 });
-  const [newParam, setNewParam] = useState({ id_meta: 1, codigo_indicador: '', descripcion: '', rem_codigo: 'REM-A01', nombre_hoja: 'Seccion_A', celda_coordenada: '' });
+  const [newParam, setNewParam] = useState({ id_meta: 0, codigo_indicador: '', descripcion: '', rem_codigo: 'REM-A01', nombre_hoja: 'Seccion_A', celda_coordenada: '', tipo_dato: 'NUMERICO' });
 
   // REM Upload State
   const [remFile, setRemFile] = useState<File | null>(null);
-  const [remMes, setRemMes] = useState(10);
+  const [remMes, setRemMes] = useState(11);
   const [remAnio, setRemAnio] = useState(2026);
-  const [uploadStatus, setUploadStatus] = useState<string>('');
+  const [uploadStatus, setUploadStatus] = useState<{ ok: boolean; msg: string } | null>(null);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const cargarDatosReales = async (authToken: string) => {
+    const headers = { Authorization: `Bearer ${authToken}` };
+    try {
+      const [resMetas, resParams, resAud] = await Promise.all([
+        fetch(`${API_URL}/dashboard/resumen`, { headers }),
+        fetch(`${API_URL}/metas/parametros`, { headers }),
+        fetch(`${API_URL}/dashboard/auditoria`, { headers }),
+      ]);
+
+      if (resMetas.status === 401) {
+        handleLogout();
+        return;
+      }
+
+      if (resMetas.ok) {
+        const dataMetas: Meta[] = await resMetas.json();
+        setMetas(dataMetas);
+        if (dataMetas.length > 0) {
+          setNewParam((prev) => ({ ...prev, id_meta: prev.id_meta || dataMetas[0].id_meta }));
+        }
+      }
+      if (resParams.ok) {
+        setParametros(await resParams.json());
+      }
+      if (resAud.ok) {
+        setAuditoria(await resAud.json());
+      }
+    } catch (err) {
+      console.error('Error conectando al backend:', err);
+    }
+  };
+
+  useEffect(() => {
+    if (token) {
+      setUserRole(parseJwtRole(token));
+      cargarDatosReales(token);
+    }
+  }, [token]);
+
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    const fakeToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...";
-    localStorage.setItem('access_token', fakeToken);
-    setToken(fakeToken);
+    setLoginError('');
+    setLoading(true);
+    try {
+      const formBody = new URLSearchParams();
+      formBody.append('username', email);
+      formBody.append('password', password);
+
+      const res = await fetch(`${API_URL}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: formBody.toString(),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        setLoginError(data.detail || 'Error al iniciar sesión');
+        return;
+      }
+
+      localStorage.setItem('access_token', data.access_token);
+      setToken(data.access_token);
+    } catch {
+      setLoginError('No se pudo conectar con el servidor Backend (puerto 8000).');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleLogout = () => {
     localStorage.removeItem('access_token');
     setToken(null);
+    setMetas([]);
+    setParametros([]);
+    setAuditoria([]);
   };
 
-  const handleCreateMeta = (e: React.FormEvent) => {
+  const handleCreateMeta = async (e: React.FormEvent) => {
     e.preventDefault();
-    const created: Meta = { ...newMeta, id_meta: Date.now(), actual: 0 };
-    setMetas([...metas, created]);
-    setNewMeta({ id_programa: 1, anio: 2026, nombre_meta: '', ponderador: 20, meta_esperada: 85 });
-    alert('Meta Sanitaria creada con éxito');
+    if (!token) return;
+    try {
+      const res = await fetch(`${API_URL}/metas/`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(newMeta),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(`Error: ${data.detail || 'No se pudo guardar la meta'}`);
+        return;
+      }
+      setNewMeta({ id_programa: 1, anio: 2026, nombre_meta: '', ponderador: 20, meta_esperada: 85 });
+      await cargarDatosReales(token);
+      alert('Meta Sanitaria guardada en PostgreSQL con éxito');
+    } catch {
+      alert('Error de conexión con el servidor');
+    }
   };
 
-  const handleCreateParam = (e: React.FormEvent) => {
+  const handleCreateParam = async (e: React.FormEvent) => {
     e.preventDefault();
-    const created: Parametro = { ...newParam, id_parametro: Date.now() };
-    setParametros([...parametros, created]);
-    setNewParam({ id_meta: 1, codigo_indicador: '', descripcion: '', rem_codigo: 'REM-A01', nombre_hoja: 'Seccion_A', celda_coordenada: '' });
-    alert('Parámetro registrado con éxito');
+    if (!token) return;
+    if (!newParam.id_meta) {
+      alert('Primero debes crear al menos una Meta Sanitaria.');
+      return;
+    }
+    try {
+      const res = await fetch(`${API_URL}/metas/parametros`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(newParam),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(`Error: ${data.detail || 'No se pudo registrar el parámetro'}`);
+        return;
+      }
+      setNewParam((prev) => ({ ...prev, codigo_indicador: '', descripcion: '', celda_coordenada: '' }));
+      await cargarDatosReales(token);
+      alert('Parámetro guardado en PostgreSQL y registrado en Auditoría');
+    } catch {
+      alert('Error de conexión con el servidor');
+    }
   };
 
-  const handleUploadREM = (e: React.FormEvent) => {
+  const handleUploadREM = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!token) return;
     if (!remFile) return alert('Selecciona un archivo .xlsx');
-    setUploadStatus('Procesando archivo Excel y calculando SHA-256...');
-    setTimeout(() => {
-      setUploadStatus(`¡Carga exitosa! Se procesó el archivo ${remFile.name} para el periodo ${remMes}/${remAnio}.`);
-    }, 1200);
+
+    setUploadStatus({ ok: true, msg: 'Enviando archivo Excel al servidor y procesando celdas...' });
+    try {
+      const formData = new FormData();
+      formData.append('archivo', remFile);
+      formData.append('mes_periodo', String(remMes));
+      formData.append('anio_periodo', String(remAnio));
+
+      const res = await fetch(`${API_URL}/rem/cargar`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        setUploadStatus({ ok: false, msg: data.detail || 'Error al procesar planilla REM.' });
+        return;
+      }
+
+      setUploadStatus({
+        ok: true,
+        msg: `¡Carga real completada! Archivo "${data.nombre_archivo}" procesado (SHA-256: ${data.hash_sha256.slice(0, 12)}...). Dashboard y Auditoría actualizados.`,
+      });
+      await cargarDatosReales(token);
+    } catch {
+      setUploadStatus({ ok: false, msg: 'Error de red al subir el archivo al backend.' });
+    }
+  };
+
+  const handleExportCSV = () => {
+    if (metas.length === 0) return alert('No hay metas para exportar.');
+    const headers = ['ID_Meta,ID_Programa,Anio,Nombre_Meta,Ponderador_Pct,Meta_Esperada_Pct,Cumplimiento_Actual_Pct'];
+    const rows = metas.map(
+      (m) => `${m.id_meta},${m.id_programa},${m.anio},"${m.nombre_meta}",${m.ponderador},${m.meta_esperada},${m.actual ?? 0}`
+    );
+    const csvContent = 'data:text/csv;charset=utf-8,' + [headers, ...rows].join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `metas_cesfam_santarosa_${remAnio}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   if (!token) {
@@ -113,6 +275,13 @@ export default function App() {
             <h1 className="text-2xl font-bold text-slate-800">CESFAM Santa Rosa</h1>
             <p className="text-sm text-slate-500">Sistema de Gestión de Metas Sanitarias (REM)</p>
           </div>
+
+          {loginError && (
+            <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              <span>{loginError}</span>
+            </div>
+          )}
 
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
@@ -137,14 +306,15 @@ export default function App() {
             </div>
             <button 
               type="submit" 
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2"
+              disabled={loading}
+              className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-medium py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2"
             >
-              <Lock className="w-4 h-4" /> Iniciar Sesión
+              <Lock className="w-4 h-4" /> {loading ? 'Validando...' : 'Iniciar Sesión'}
             </button>
           </form>
 
           <div className="text-xs text-center text-slate-400">
-            Compatible con la API REST de FastAPI y autenticación RBAC
+            Conectado a FastAPI + PostgreSQL Local
           </div>
         </div>
       </div>
@@ -220,37 +390,52 @@ export default function App() {
         <main className="flex-1 p-8">
           {currentTab === 'dashboard' && (
             <div className="space-y-6">
-              <h2 className="text-xl font-bold text-slate-800">Resumen Analítico de Metas Sanitarias</h2>
-              
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                {metas.map((m) => {
-                  const pct = m.actual || 0;
-                  const cumplida = pct >= m.meta_esperada;
-                  return (
-                    <div key={m.id_meta} className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-3">
-                      <div className="flex items-start justify-between">
-                        <span className="text-xs font-semibold px-2.5 py-1 bg-slate-100 text-slate-600 rounded-full">Programa {m.id_programa}</span>
-                        <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${cumplida ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
-                          {cumplida ? 'Meta Alcanzada' : 'En Progreso'}
-                        </span>
-                      </div>
-                      <h3 className="font-semibold text-slate-800 text-sm">{m.nombre_meta}</h3>
-                      <div className="space-y-1">
-                        <div className="flex justify-between text-xs text-slate-500">
-                          <span>Progreso Actual: <b>{pct}%</b></span>
-                          <span>Esperado: <b>{m.meta_esperada}%</b></span>
-                        </div>
-                        <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                          <div 
-                            className={`h-full ${cumplida ? 'bg-green-500' : 'bg-blue-600'}`} 
-                            style={{ width: `${Math.min(pct, 100)}%` }}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-bold text-slate-800">Resumen Analítico de Metas Sanitarias (Datos Reales)</h2>
+                <button
+                  onClick={handleExportCSV}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium px-3.5 py-2 rounded-lg flex items-center gap-2 transition-colors"
+                >
+                  <Download className="w-4 h-4" /> Exportar CSV (Power BI / Excel)
+                </button>
               </div>
+              
+              {metas.length === 0 ? (
+                <div className="bg-white p-8 rounded-xl border border-slate-200 text-center space-y-2">
+                  <p className="text-slate-600 font-medium">Aún no hay Metas Sanitarias registradas en PostgreSQL.</p>
+                  <p className="text-xs text-slate-400">Ve a la pestaña "Metas Sanitarias" para crear la primera.</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  {metas.map((m) => {
+                    const pct = m.actual || 0;
+                    const cumplida = pct >= m.meta_esperada;
+                    return (
+                      <div key={m.id_meta} className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-3">
+                        <div className="flex items-start justify-between">
+                          <span className="text-xs font-semibold px-2.5 py-1 bg-slate-100 text-slate-600 rounded-full">Programa {m.id_programa}</span>
+                          <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${cumplida ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+                            {cumplida ? 'Meta Alcanzada' : 'En Progreso'}
+                          </span>
+                        </div>
+                        <h3 className="font-semibold text-slate-800 text-sm">{m.nombre_meta}</h3>
+                        <div className="space-y-1">
+                          <div className="flex justify-between text-xs text-slate-500">
+                            <span>Progreso Actual: <b>{pct}%</b></span>
+                            <span>Esperado: <b>{m.meta_esperada}%</b></span>
+                          </div>
+                          <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                            <div 
+                              className={`h-full ${cumplida ? 'bg-green-500' : 'bg-blue-600'}`} 
+                              style={{ width: `${Math.min(pct, 100)}%` }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -264,7 +449,16 @@ export default function App() {
                 <h3 className="text-sm font-bold text-slate-700 uppercase flex items-center gap-2">
                   <Plus className="w-4 h-4 text-blue-600" /> Crear Nueva Meta Sanitaria
                 </h3>
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+                  <select
+                    value={newMeta.id_programa}
+                    onChange={(e) => setNewMeta({ ...newMeta, id_programa: Number(e.target.value) })}
+                    className="border p-2.5 text-sm rounded-lg"
+                  >
+                    <option value={1}>Programa 1 (Infantil)</option>
+                    <option value={2}>Programa 2 (Cardiovascular)</option>
+                    <option value={3}>Programa 3 (Mujer)</option>
+                  </select>
                   <input 
                     type="text" 
                     placeholder="Nombre de la Meta" 
@@ -295,7 +489,7 @@ export default function App() {
                   />
                 </div>
                 <button type="submit" className="bg-blue-600 text-white text-sm font-medium px-4 py-2 rounded-lg hover:bg-blue-700">
-                  Guardar Meta
+                  Guardar Meta en BD
                 </button>
               </form>
 
@@ -304,6 +498,7 @@ export default function App() {
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold text-xs uppercase">
                       <th className="p-3">ID</th>
+                      <th className="p-3">Programa</th>
                       <th className="p-3">Nombre Meta</th>
                       <th className="p-3">Año</th>
                       <th className="p-3">Ponderador</th>
@@ -314,6 +509,7 @@ export default function App() {
                     {metas.map((m) => (
                       <tr key={m.id_meta} className="hover:bg-slate-50">
                         <td className="p-3 font-mono text-slate-500">{m.id_meta}</td>
+                        <td className="p-3 text-slate-600">{m.id_programa}</td>
                         <td className="p-3 font-medium text-slate-800">{m.nombre_meta}</td>
                         <td className="p-3 text-slate-600">{m.anio}</td>
                         <td className="p-3 text-slate-600">{m.ponderador}%</td>
@@ -340,6 +536,7 @@ export default function App() {
                     onChange={(e) => setNewParam({ ...newParam, id_meta: Number(e.target.value) })}
                     className="border p-2.5 text-sm rounded-lg"
                   >
+                    {metas.length === 0 && <option value={0}>Crea una meta primero...</option>}
                     {metas.map(m => (
                       <option key={m.id_meta} value={m.id_meta}>{m.nombre_meta}</option>
                     ))}
@@ -381,7 +578,7 @@ export default function App() {
                   />
                 </div>
                 <button type="submit" className="bg-blue-600 text-white text-sm font-medium px-4 py-2 rounded-lg hover:bg-blue-700">
-                  Guardar Parametrización
+                  Guardar Parametrización en BD
                 </button>
               </form>
 
@@ -442,7 +639,7 @@ export default function App() {
 
                 <div className="border-2 border-dashed border-slate-300 rounded-xl p-8 text-center space-y-2 bg-slate-50 hover:bg-slate-100 transition-colors cursor-pointer">
                   <Upload className="w-8 h-8 text-slate-400 mx-auto" />
-                  <p className="text-sm font-medium text-slate-700">Arrastra tu archivo Excel aquí o haz clic para buscar</p>
+                  <p className="text-sm font-medium text-slate-700">Selecciona tu archivo Excel (.xlsx)</p>
                   <p className="text-xs text-slate-400">Archivos soportados: .xlsx (Máximo 25 MB)</p>
                   <input 
                     type="file" 
@@ -460,14 +657,14 @@ export default function App() {
                   type="submit" 
                   className="w-full bg-blue-600 text-white font-medium py-2.5 rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
                 >
-                  <FileSpreadsheet className="w-4 h-4" /> Procesar y Ingestar REM
+                  <FileSpreadsheet className="w-4 h-4" /> Procesar e Ingestar REM
                 </button>
               </form>
 
               {uploadStatus && (
-                <div className="p-4 bg-green-50 border border-green-200 text-green-800 rounded-xl text-xs font-medium flex items-center gap-2">
-                  <CheckCircle2 className="w-5 h-5 text-green-600 flex-shrink-0" />
-                  <span>{uploadStatus}</span>
+                <div className={`p-4 border rounded-xl text-xs font-medium flex items-center gap-2 ${uploadStatus.ok ? 'bg-green-50 border-green-200 text-green-800' : 'bg-red-50 border-red-200 text-red-800'}`}>
+                  {uploadStatus.ok ? <CheckCircle2 className="w-5 h-5 text-green-600 flex-shrink-0" /> : <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0" />}
+                  <span>{uploadStatus.msg}</span>
                 </div>
               )}
             </div>
@@ -475,12 +672,13 @@ export default function App() {
 
           {currentTab === 'auditoria' && (
             <div className="space-y-6">
-              <h2 className="text-xl font-bold text-slate-800">Registro Inmutable de Auditoría</h2>
+              <h2 className="text-xl font-bold text-slate-800">Registro Inmutable de Auditoría (PostgreSQL)</h2>
               <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
                 <table className="w-full text-left border-collapse text-sm">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold text-xs uppercase">
                       <th className="p-3">ID</th>
+                      <th className="p-3">Usuario ID</th>
                       <th className="p-3">Acción</th>
                       <th className="p-3">Tabla Modificada</th>
                       <th className="p-3">ID Afectado</th>
@@ -488,20 +686,24 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    <tr className="hover:bg-slate-50">
-                      <td className="p-3 font-mono text-slate-500">101</td>
-                      <td className="p-3 font-bold text-blue-600">CARGA_Y_PROCESAMIENTO_REM</td>
-                      <td className="p-3 text-slate-700">carga_rem</td>
-                      <td className="p-3 text-slate-700">15</td>
-                      <td className="p-3 text-xs text-slate-500">2026-10-22 18:30:12</td>
-                    </tr>
-                    <tr className="hover:bg-slate-50">
-                      <td className="p-3 font-mono text-slate-500">100</td>
-                      <td className="p-3 font-bold text-slate-700">CONFIGURACION_PARAMETRO_REM</td>
-                      <td className="p-3 text-slate-700">parametro_indicador</td>
-                      <td className="p-3 text-slate-700">2</td>
-                      <td className="p-3 text-xs text-slate-500">2026-10-22 17:15:00</td>
-                    </tr>
+                    {auditoria.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="p-6 text-center text-slate-400 text-xs">
+                          Aún no hay eventos registrados. Crea un parámetro o carga un Excel REM para generar auditoría real.
+                        </td>
+                      </tr>
+                    ) : (
+                      auditoria.map((a) => (
+                        <tr key={a.id_auditoria} className="hover:bg-slate-50">
+                          <td className="p-3 font-mono text-slate-500">{a.id_auditoria}</td>
+                          <td className="p-3 font-mono text-slate-600">{a.id_usuario}</td>
+                          <td className="p-3 font-bold text-blue-600">{a.accion}</td>
+                          <td className="p-3 text-slate-700">{a.tabla_modificada}</td>
+                          <td className="p-3 text-slate-700">{a.id_registro_afectado}</td>
+                          <td className="p-3 text-xs text-slate-500">{a.fecha_hora}</td>
+                        </tr>
+                      ))
+                    )}
                   </tbody>
                 </table>
               </div>
