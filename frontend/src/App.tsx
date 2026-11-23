@@ -13,7 +13,11 @@ import {
   Sliders, 
   Lock,
   UserCheck,
-  Download
+  Download,
+  Trash2,
+  Users,
+  Info,
+  Filter
 } from 'lucide-react';
 
 const API_URL = 'http://127.0.0.1:8000/api/v1';
@@ -21,11 +25,13 @@ const API_URL = 'http://127.0.0.1:8000/api/v1';
 interface Meta {
   id_meta: number;
   id_programa: number;
+  nombre_programa?: string;
   anio: number;
   nombre_meta: string;
   ponderador: number;
   meta_esperada: number;
   actual?: number;
+  valor_obtenido?: number;
 }
 
 interface Parametro {
@@ -40,11 +46,32 @@ interface Parametro {
 
 interface AuditoriaItem {
   id_auditoria: number;
-  id_usuario: number;
+  responsable_nombre: string;
+  responsable_email: string;
   accion: string;
   tabla_modificada: string;
   id_registro_afectado: number;
+  detalle: string;
   fecha_hora: string;
+}
+
+interface UsuarioItem {
+  id_usuario: number;
+  rut: string;
+  nombre: string;
+  email: string;
+  activo: boolean;
+  id_rol: number;
+  nombre_rol: string;
+  id_programa: number | null;
+  nombre_programa: string;
+}
+
+interface CatalogoItem {
+  id_rol?: number;
+  nombre_rol?: string;
+  id_programa?: number;
+  nombre_programa?: string;
 }
 
 function parseJwtRole(token: string | null): string {
@@ -60,7 +87,7 @@ function parseJwtRole(token: string | null): string {
 export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem('access_token'));
   const [userRole, setUserRole] = useState<string>(() => parseJwtRole(localStorage.getItem('access_token')));
-  const [currentTab, setCurrentTab] = useState<'dashboard' | 'metas' | 'parametros' | 'rem' | 'auditoria'>('dashboard');
+  const [currentTab, setCurrentTab] = useState<'dashboard' | 'metas' | 'parametros' | 'rem' | 'auditoria' | 'usuarios'>('dashboard');
 
   // Login State
   const [email, setEmail] = useState('admin@cesfam.cl');
@@ -68,14 +95,22 @@ export default function App() {
   const [loginError, setLoginError] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
 
-  // Data States (100% desde PostgreSQL)
+  // Data States
   const [metas, setMetas] = useState<Meta[]>([]);
   const [parametros, setParametros] = useState<Parametro[]>([]);
   const [auditoria, setAuditoria] = useState<AuditoriaItem[]>([]);
+  const [usuarios, setUsuarios] = useState<UsuarioItem[]>([]);
+  const [rolesList, setRolesList] = useState<CatalogoItem[]>([]);
+  const [programasList, setProgramasList] = useState<CatalogoItem[]>([]);
+
+  // Dashboard Filters
+  const [filtroPrograma, setFiltroPrograma] = useState<number>(0);
+  const [filtroAnio, setFiltroAnio] = useState<number>(0);
 
   // Form States
   const [newMeta, setNewMeta] = useState({ id_programa: 1, anio: 2026, nombre_meta: '', ponderador: 20, meta_esperada: 85 });
-  const [newParam, setNewParam] = useState({ id_meta: 0, codigo_indicador: '', descripcion: '', rem_codigo: 'REM-A01', nombre_hoja: 'Seccion_A', celda_coordenada: '', tipo_dato: 'NUMERICO' });
+  const [newParam, setNewParam] = useState({ id_meta: 0, codigo_indicador: '', descripcion: '', rem_codigo: 'REM-A01', nombre_hoja: 'Seccion_A', celda_coordenada: '', tipo_dato: 'NUMERIC' });
+  const [newUser, setNewUser] = useState({ rut: '', nombre: '', email: '', password: '', id_rol: 2, id_programa: 0 });
 
   // REM Upload State
   const [remFile, setRemFile] = useState<File | null>(null);
@@ -83,14 +118,24 @@ export default function App() {
   const [remAnio, setRemAnio] = useState(2026);
   const [uploadStatus, setUploadStatus] = useState<{ ok: boolean; msg: string } | null>(null);
 
-  const cargarDatosReales = async (authToken: string) => {
+  const esAdmin = userRole === 'Gestor de Informacion';
+  const puedeEditar = userRole === 'Gestor de Informacion' || userRole === 'Subdireccion';
+
+  const cargarDatosReales = async (authToken: string, roleDetected: string) => {
     const headers = { Authorization: `Bearer ${authToken}` };
     try {
-      const [resMetas, resParams, resAud] = await Promise.all([
+      const peticiones = [
         fetch(`${API_URL}/dashboard/resumen`, { headers }),
         fetch(`${API_URL}/metas/parametros`, { headers }),
         fetch(`${API_URL}/dashboard/auditoria`, { headers }),
-      ]);
+        fetch(`${API_URL}/auth/roles`, { headers }),
+      ];
+
+      if (roleDetected === 'Gestor de Informacion') {
+        peticiones.push(fetch(`${API_URL}/auth/usuarios`, { headers }));
+      }
+
+      const [resMetas, resParams, resAud, resCat, resUsers] = await Promise.all(peticiones);
 
       if (resMetas.status === 401) {
         handleLogout();
@@ -104,11 +149,15 @@ export default function App() {
           setNewParam((prev) => ({ ...prev, id_meta: prev.id_meta || dataMetas[0].id_meta }));
         }
       }
-      if (resParams.ok) {
-        setParametros(await resParams.json());
+      if (resParams.ok) setParametros(await resParams.json());
+      if (resAud.ok) setAuditoria(await resAud.json());
+      if (resCat && resCat.ok) {
+        const catData = await resCat.json();
+        setRolesList(catData.roles || []);
+        setProgramasList(catData.programas || []);
       }
-      if (resAud.ok) {
-        setAuditoria(await resAud.json());
+      if (resUsers && resUsers.ok) {
+        setUsuarios(await resUsers.json());
       }
     } catch (err) {
       console.error('Error conectando al backend:', err);
@@ -117,8 +166,10 @@ export default function App() {
 
   useEffect(() => {
     if (token) {
-      setUserRole(parseJwtRole(token));
-      cargarDatosReales(token);
+      const role = parseJwtRole(token);
+      setUserRole(role);
+      setCurrentTab('dashboard');
+      cargarDatosReales(token, role);
     }
   }, [token]);
 
@@ -158,60 +209,101 @@ export default function App() {
     setMetas([]);
     setParametros([]);
     setAuditoria([]);
+    setUsuarios([]);
   };
 
   const handleCreateMeta = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!token) return;
-    try {
-      const res = await fetch(`${API_URL}/metas/`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(newMeta),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        alert(`Error: ${data.detail || 'No se pudo guardar la meta'}`);
-        return;
-      }
-      setNewMeta({ id_programa: 1, anio: 2026, nombre_meta: '', ponderador: 20, meta_esperada: 85 });
-      await cargarDatosReales(token);
-      alert('Meta Sanitaria guardada en PostgreSQL con éxito');
-    } catch {
-      alert('Error de conexión con el servidor');
-    }
+    const res = await fetch(`${API_URL}/metas/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(newMeta),
+    });
+    const data = await res.json();
+    if (!res.ok) return alert(`Error: ${data.detail || 'No se pudo guardar la meta'}`);
+
+    setNewMeta({ id_programa: 1, anio: 2026, nombre_meta: '', ponderador: 20, meta_esperada: 85 });
+    await cargarDatosReales(token, userRole);
+    alert('Meta Sanitaria creada y registrada en Auditoría.');
+  };
+
+  const handleDeleteMeta = async (idMeta: number, nombreMeta: string) => {
+    if (!token) return;
+    if (!confirm(`¿Seguro que deseas eliminar la meta "${nombreMeta}"? Esta acción quedará registrada en Auditoría.`)) return;
+
+    const res = await fetch(`${API_URL}/metas/${idMeta}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await res.json();
+    if (!res.ok) return alert(`Error: ${data.detail}`);
+
+    await cargarDatosReales(token, userRole);
   };
 
   const handleCreateParam = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!token) return;
-    if (!newParam.id_meta) {
-      alert('Primero debes crear al menos una Meta Sanitaria.');
-      return;
-    }
-    try {
-      const res = await fetch(`${API_URL}/metas/parametros`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(newParam),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        alert(`Error: ${data.detail || 'No se pudo registrar el parámetro'}`);
-        return;
-      }
-      setNewParam((prev) => ({ ...prev, codigo_indicador: '', descripcion: '', celda_coordenada: '' }));
-      await cargarDatosReales(token);
-      alert('Parámetro guardado en PostgreSQL y registrado en Auditoría');
-    } catch {
-      alert('Error de conexión con el servidor');
-    }
+    if (!newParam.id_meta) return alert('Primero debes crear al menos una Meta Sanitaria.');
+
+    const res = await fetch(`${API_URL}/metas/parametros`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(newParam),
+    });
+    const data = await res.json();
+    if (!res.ok) return alert(`Error: ${data.detail || 'No se pudo registrar el parámetro'}`);
+
+    setNewParam((prev) => ({ ...prev, codigo_indicador: '', descripcion: '', celda_coordenada: '' }));
+    await cargarDatosReales(token, userRole);
+    alert('Parámetro guardado y registrado en Auditoría.');
+  };
+
+  const handleDeleteParam = async (idParam: number, codigo: string) => {
+    if (!token) return;
+    if (!confirm(`¿Eliminar el parámetro "${codigo}"? Quedará registro de quién lo eliminó en Auditoría.`)) return;
+
+    const res = await fetch(`${API_URL}/metas/parametros/${idParam}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await res.json();
+    if (!res.ok) return alert(`Error: ${data.detail}`);
+
+    await cargarDatosReales(token, userRole);
+  };
+
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+    const payload = {
+      ...newUser,
+      id_programa: newUser.id_programa === 0 ? null : newUser.id_programa,
+    };
+    const res = await fetch(`${API_URL}/auth/usuarios`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) return alert(`Error: ${data.detail || 'No se pudo crear el usuario'}`);
+
+    setNewUser({ rut: '', nombre: '', email: '', password: '', id_rol: 2, id_programa: 0 });
+    await cargarDatosReales(token, userRole);
+    alert('Usuario institucional creado con éxito.');
+  };
+
+  const handleToggleUserStatus = async (idUsuario: number) => {
+    if (!token) return;
+    const res = await fetch(`${API_URL}/auth/usuarios/${idUsuario}/estado`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await res.json();
+    if (!res.ok) return alert(`Error: ${data.detail}`);
+
+    await cargarDatosReales(token, userRole);
   };
 
   const handleUploadREM = async (e: React.FormEvent) => {
@@ -219,7 +311,7 @@ export default function App() {
     if (!token) return;
     if (!remFile) return alert('Selecciona un archivo .xlsx');
 
-    setUploadStatus({ ok: true, msg: 'Enviando archivo Excel al servidor y procesando celdas...' });
+    setUploadStatus({ ok: true, msg: 'Procesando planilla Excel en memoria y calculando cumplimiento...' });
     try {
       const formData = new FormData();
       formData.append('archivo', remFile);
@@ -240,29 +332,59 @@ export default function App() {
 
       setUploadStatus({
         ok: true,
-        msg: `¡Carga real completada! Archivo "${data.nombre_archivo}" procesado (SHA-256: ${data.hash_sha256.slice(0, 12)}...). Dashboard y Auditoría actualizados.`,
+        msg: `¡Carga exitosa! Planilla "${data.nombre_archivo}" verificada (SHA-256: ${data.hash_sha256.slice(0, 12)}...). Resultados actualizados en el Dashboard.`,
       });
-      await cargarDatosReales(token);
+      await cargarDatosReales(token, userRole);
     } catch {
       setUploadStatus({ ok: false, msg: 'Error de red al subir el archivo al backend.' });
     }
   };
 
   const handleExportCSV = () => {
-    if (metas.length === 0) return alert('No hay metas para exportar.');
-    const headers = ['ID_Meta,ID_Programa,Anio,Nombre_Meta,Ponderador_Pct,Meta_Esperada_Pct,Cumplimiento_Actual_Pct'];
-    const rows = metas.map(
-      (m) => `${m.id_meta},${m.id_programa},${m.anio},"${m.nombre_meta}",${m.ponderador},${m.meta_esperada},${m.actual ?? 0}`
+    if (metasFiltradas.length === 0) return alert('No hay metas para exportar con el filtro actual.');
+    const headers = ['ID_Meta,Programa,Anio,Nombre_Meta,Ponderador_Pct,Meta_Esperada_Pct,Cumplimiento_Real_Pct'];
+    const rows = metasFiltradas.map(
+      (m) => `${m.id_meta},"${m.nombre_programa || m.id_programa}",${m.anio},"${m.nombre_meta}",${m.ponderador},${m.meta_esperada},${m.actual ?? 0}`
     );
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers, ...rows].join('\n');
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `metas_cesfam_santarosa_${remAnio}.csv`);
+    link.setAttribute('download', `reporte_metas_cesfam_santarosa.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   };
+
+const handleExportAuditoriaCSV = () => {
+    if (auditoria.length === 0) return alert('No hay registros de auditoría para exportar.');
+    const headers = ['ID,Responsable,Correo,Accion,Tabla,ID_Afectado,Detalle,Fecha_Hora'];
+    const rows = auditoria.map(
+      (a) => `${a.id_auditoria},"${a.responsable_nombre}","${a.responsable_email}","${a.accion}","${a.tabla_modificada}",${a.id_registro_afectado},"${a.detalle.replace(/"/g, '""')}","${a.fecha_hora}"`
+    );
+    const csvContent = 'data:text/csv;charset=utf-8,' + [headers, ...rows].join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `auditoria_cesfam_santarosa.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Filtrado dinámico de metas para Dashboard
+  const metasFiltradas = metas.filter((m) => {
+    if (filtroPrograma !== 0 && m.id_programa !== filtroPrograma) return false;
+    if (filtroAnio !== 0 && m.anio !== filtroAnio) return false;
+    return true;
+  });
+
+  const aniosDisponibles = Array.from(new Set(metas.map((m) => m.anio))).sort();
+  const totalMetas = metasFiltradas.length;
+  const metasCumplidas = metasFiltradas.filter((m) => (m.actual || 0) >= m.meta_esperada).length;
+  const promedioCumplimiento = totalMetas > 0
+    ? (metasFiltradas.reduce((acc, m) => acc + (m.actual || 0), 0) / totalMetas).toFixed(1)
+    : '0.0';
 
   if (!token) {
     return (
@@ -273,7 +395,7 @@ export default function App() {
               <Building2 className="w-8 h-8" />
             </div>
             <h1 className="text-2xl font-bold text-slate-800">CESFAM Santa Rosa</h1>
-            <p className="text-sm text-slate-500">Sistema de Gestión de Metas Sanitarias (REM)</p>
+            <p className="text-sm text-slate-500">Plataforma de Control de Metas Sanitarias y REM</p>
           </div>
 
           {loginError && (
@@ -285,7 +407,7 @@ export default function App() {
 
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
-              <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Correo Electrónico</label>
+              <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Correo Institucional</label>
               <input 
                 type="email" 
                 value={email}
@@ -309,12 +431,12 @@ export default function App() {
               disabled={loading}
               className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-medium py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2"
             >
-              <Lock className="w-4 h-4" /> {loading ? 'Validando...' : 'Iniciar Sesión'}
+              <Lock className="w-4 h-4" /> {loading ? 'Verificando credenciales...' : 'Ingresar al Sistema'}
             </button>
           </form>
 
-          <div className="text-xs text-center text-slate-400">
-            Conectado a FastAPI + PostgreSQL Local
+          <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 text-xs text-slate-500 text-center">
+            Acceso protegido con cifrado JWT, control de roles (RBAC) y bloqueo anti fuerza bruta.
           </div>
         </div>
       </div>
@@ -331,102 +453,214 @@ export default function App() {
           </div>
           <div>
             <h1 className="font-bold text-slate-800 leading-none">CESFAM Santa Rosa</h1>
-            <span className="text-xs text-slate-500">Gestión e Ingesta de Planillas REM</span>
+            <span className="text-xs text-slate-500">Gestión de Metas Sanitarias y Planillas REM</span>
           </div>
         </div>
 
         <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2 bg-slate-100 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-700">
+          <div className="flex items-center gap-2 bg-blue-50 border border-blue-100 px-3 py-1.5 rounded-lg text-xs font-medium text-blue-800">
             <UserCheck className="w-4 h-4 text-blue-600" />
-            <span>Rol: <b>{userRole}</b></span>
+            <span>Perfil activo: <b>{userRole}</b></span>
           </div>
           <button 
             onClick={handleLogout}
-            className="p-2 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
             title="Cerrar Sesión"
           >
-            <LogOut className="w-5 h-5" />
+            <LogOut className="w-4 h-4" /> Salir
           </button>
         </div>
       </header>
 
       {/* Main Container */}
       <div className="flex flex-1">
-        {/* Sidebar Nav */}
-        <aside className="w-64 bg-white border-r border-slate-200 p-4 space-y-1">
-          <button 
-            onClick={() => setCurrentTab('dashboard')} 
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${currentTab === 'dashboard' ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-100'}`}
-          >
-            <BarChart3 className="w-4 h-4" /> Dashboard General
-          </button>
-          <button 
-            onClick={() => setCurrentTab('metas')} 
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${currentTab === 'metas' ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-100'}`}
-          >
-            <Target className="w-4 h-4" /> Metas Sanitarias
-          </button>
-          <button 
-            onClick={() => setCurrentTab('parametros')} 
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${currentTab === 'parametros' ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-100'}`}
-          >
-            <Sliders className="w-4 h-4" /> Parametrización Celdas
-          </button>
-          <button 
-            onClick={() => setCurrentTab('rem')} 
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${currentTab === 'rem' ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-100'}`}
-          >
-            <FileSpreadsheet className="w-4 h-4" /> Ingesta Carga REM
-          </button>
-          <button 
-            onClick={() => setCurrentTab('auditoria')} 
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${currentTab === 'auditoria' ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-100'}`}
-          >
-            <ShieldCheck className="w-4 h-4" /> Registro Auditoría
-          </button>
+        {/* Sidebar Nav con control de visibilidad según Rol (RBAC) */}
+        <aside className="w-64 bg-white border-r border-slate-200 p-4 flex flex-col justify-between">
+          <div className="space-y-1">
+            <p className="px-3 text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-2">Análisis y Reportes</p>
+            <button 
+              onClick={() => setCurrentTab('dashboard')} 
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${currentTab === 'dashboard' ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-100'}`}
+            >
+              <BarChart3 className="w-4 h-4" /> Panel de Metas
+            </button>
+
+            {puedeEditar && (
+              <>
+                <p className="px-3 pt-4 text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-2">Operación REM</p>
+                <button 
+                  onClick={() => setCurrentTab('metas')} 
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${currentTab === 'metas' ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-100'}`}
+                >
+                  <Target className="w-4 h-4" /> 1. Definir Metas
+                </button>
+                <button 
+                  onClick={() => setCurrentTab('parametros')} 
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${currentTab === 'parametros' ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-100'}`}
+                >
+                  <Sliders className="w-4 h-4" /> 2. Configurar Celdas
+                </button>
+                <button 
+                  onClick={() => setCurrentTab('rem')} 
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${currentTab === 'rem' ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-100'}`}
+                >
+                  <FileSpreadsheet className="w-4 h-4" /> 3. Subir Planilla REM
+                </button>
+              </>
+            )}
+
+            <p className="px-3 pt-4 text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-2">Control y Seguridad</p>
+            <button 
+              onClick={() => setCurrentTab('auditoria')} 
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${currentTab === 'auditoria' ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-100'}`}
+            >
+              <ShieldCheck className="w-4 h-4" /> Auditoría de Cambios
+            </button>
+
+            {esAdmin && (
+              <button 
+                onClick={() => setCurrentTab('usuarios')} 
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${currentTab === 'usuarios' ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-100'}`}
+              >
+                <Users className="w-4 h-4" /> Gestión de Usuarios
+              </button>
+            )}
+          </div>
+
+          <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 text-xs text-slate-500 space-y-1">
+            <p className="font-semibold text-slate-700">Flujo Rápido:</p>
+            <p>1. Crea una meta sanitaria.</p>
+            <p>2. Asocia su celda Excel.</p>
+            <p>3. Sube el archivo REM.</p>
+          </div>
         </aside>
 
         {/* Content Area */}
-        <main className="flex-1 p-8">
+        <main className="flex-1 p-8 space-y-6">
           {currentTab === 'dashboard' && (
             <div className="space-y-6">
-              <div className="flex items-center justify-between">
-                <h2 className="text-xl font-bold text-slate-800">Resumen Analítico de Metas Sanitarias (Datos Reales)</h2>
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-xl font-bold text-slate-800">Panel Ejecutivo de Metas Sanitarias</h2>
+                  <p className="text-xs text-slate-500">Visualización en tiempo real del cumplimiento calculado desde planillas REM</p>
+                </div>
                 <button
                   onClick={handleExportCSV}
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium px-3.5 py-2 rounded-lg flex items-center gap-2 transition-colors"
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium px-4 py-2.5 rounded-lg flex items-center gap-2 transition-colors shadow-sm"
                 >
-                  <Download className="w-4 h-4" /> Exportar CSV (Power BI / Excel)
+                  <Download className="w-4 h-4" /> Exportar Reporte CSV (Power BI)
                 </button>
               </div>
+
+              {/* Tarjetas KPI de Resumen */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                  <p className="text-xs font-semibold text-slate-500 uppercase">Metas Evaluadas</p>
+                  <p className="text-2xl font-bold text-slate-800 mt-1">{totalMetas}</p>
+                </div>
+                <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                  <p className="text-xs font-semibold text-slate-500 uppercase">Metas Alcanzadas</p>
+                  <p className="text-2xl font-bold text-emerald-600 mt-1">{metasCumplidas} <span className="text-xs font-normal text-slate-400">de {totalMetas}</span></p>
+                </div>
+                <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                  <p className="text-xs font-semibold text-slate-500 uppercase">Cumplimiento Promedio</p>
+                  <p className="text-2xl font-bold text-blue-600 mt-1">{promedioCumplimiento}%</p>
+                </div>
+              </div>
+
+              {/* Barra de Filtros por Programa y Año (RF-05, RF-06) */}
+              <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center gap-4">
+                <div className="flex items-center gap-2 text-xs font-bold text-slate-600 uppercase">
+                  <Filter className="w-4 h-4 text-blue-600" /> Filtrar Reporte:
+                </div>
+                <select
+                  value={filtroPrograma}
+                  onChange={(e) => setFiltroPrograma(Number(e.target.value))}
+                  className="border border-slate-300 px-3 py-1.5 text-xs rounded-lg bg-slate-50"
+                >
+                  <option value={0}>Todos los Programas de Salud</option>
+                  {programasList.map((p) => (
+                    <option key={p.id_programa} value={p.id_programa}>{p.nombre_programa}</option>
+                  ))}
+                </select>
+                <select
+                  value={filtroAnio}
+                  onChange={(e) => setFiltroAnio(Number(e.target.value))}
+                  className="border border-slate-300 px-3 py-1.5 text-xs rounded-lg bg-slate-50"
+                >
+                  <option value={0}>Todos los Años</option>
+                  {aniosDisponibles.map((a) => (
+                    <option key={a} value={a}>Año {a}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Gráfico de Barras Comparativo (RF-08) */}
+              {metasFiltradas.length > 0 && (
+                <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-sm font-bold text-slate-700 uppercase">Comparativo Gráfico: Cumplimiento Real vs. Meta Esperada</h3>
+                    <div className="flex items-center gap-4 text-xs">
+                      <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-blue-600 inline-block"></span> Real Obtenido (%)</span>
+                      <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-slate-300 inline-block"></span> Meta Exigida (%)</span>
+                    </div>
+                  </div>
+                  <div className="space-y-4 pt-2">
+                    {metasFiltradas.map((m) => {
+                      const real = Math.min(m.actual || 0, 100);
+                      const esperada = Math.min(m.meta_esperada, 100);
+                      return (
+                        <div key={`chart-${m.id_meta}`} className="space-y-1.5">
+                          <div className="flex justify-between text-xs">
+                            <span className="font-medium text-slate-700">{m.nombre_meta} <span className="text-slate-400">({m.nombre_programa})</span></span>
+                            <span className="font-mono font-bold text-slate-700">{m.actual ?? 0}% / {m.meta_esperada}%</span>
+                          </div>
+                          <div className="space-y-1">
+                            <div className="w-full bg-slate-100 h-3 rounded-full overflow-hidden">
+                              <div
+                                className={`h-full transition-all duration-500 ${real >= esperada ? 'bg-emerald-500' : 'bg-blue-600'}`}
+                                style={{ width: `${real}%` }}
+                              />
+                            </div>
+                            <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+                              <div className="h-full bg-slate-400" style={{ width: `${esperada}%` }} />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               
-              {metas.length === 0 ? (
+              {/* Tarjetas Detalladas por Meta */}
+              {metasFiltradas.length === 0 ? (
                 <div className="bg-white p-8 rounded-xl border border-slate-200 text-center space-y-2">
-                  <p className="text-slate-600 font-medium">Aún no hay Metas Sanitarias registradas en PostgreSQL.</p>
-                  <p className="text-xs text-slate-400">Ve a la pestaña "Metas Sanitarias" para crear la primera.</p>
+                  <p className="text-slate-600 font-medium">No hay metas sanitarias para mostrar con los filtros seleccionados.</p>
+                  <p className="text-xs text-slate-400">Crea una meta en "1. Definir Metas" o ajusta los filtros superiores.</p>
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  {metas.map((m) => {
+                  {metasFiltradas.map((m) => {
                     const pct = m.actual || 0;
                     const cumplida = pct >= m.meta_esperada;
                     return (
                       <div key={m.id_meta} className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-3">
-                        <div className="flex items-start justify-between">
-                          <span className="text-xs font-semibold px-2.5 py-1 bg-slate-100 text-slate-600 rounded-full">Programa {m.id_programa}</span>
-                          <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${cumplida ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="text-xs font-semibold px-2.5 py-1 bg-slate-100 text-slate-600 rounded-full">{m.nombre_programa || `Programa ${m.id_programa}`}</span>
+                          <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${cumplida ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
                             {cumplida ? 'Meta Alcanzada' : 'En Progreso'}
                           </span>
                         </div>
                         <h3 className="font-semibold text-slate-800 text-sm">{m.nombre_meta}</h3>
                         <div className="space-y-1">
                           <div className="flex justify-between text-xs text-slate-500">
-                            <span>Progreso Actual: <b>{pct}%</b></span>
-                            <span>Esperado: <b>{m.meta_esperada}%</b></span>
+                            <span>Cumplimiento: <b>{pct}%</b></span>
+                            <span>Exigido: <b>{m.meta_esperada}%</b></span>
                           </div>
                           <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
                             <div 
-                              className={`h-full ${cumplida ? 'bg-green-500' : 'bg-blue-600'}`} 
+                              className={`h-full ${cumplida ? 'bg-emerald-500' : 'bg-blue-600'}`} 
                               style={{ width: `${Math.min(pct, 100)}%` }}
                             />
                           </div>
@@ -439,10 +673,11 @@ export default function App() {
             </div>
           )}
 
-          {currentTab === 'metas' && (
+          {currentTab === 'metas' && puedeEditar && (
             <div className="space-y-6">
-              <div className="flex items-center justify-between">
-                <h2 className="text-xl font-bold text-slate-800">Metas Sanitarias Configuradas</h2>
+              <div>
+                <h2 className="text-xl font-bold text-slate-800">Paso 1: Definición de Metas Sanitarias</h2>
+                <p className="text-xs text-slate-500">Registra las metas anuales por programa de salud y el porcentaje exigido por el Ministerio.</p>
               </div>
 
               <form onSubmit={handleCreateMeta} className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
@@ -455,9 +690,17 @@ export default function App() {
                     onChange={(e) => setNewMeta({ ...newMeta, id_programa: Number(e.target.value) })}
                     className="border p-2.5 text-sm rounded-lg"
                   >
-                    <option value={1}>Programa 1 (Infantil)</option>
-                    <option value={2}>Programa 2 (Cardiovascular)</option>
-                    <option value={3}>Programa 3 (Mujer)</option>
+                    {programasList.length > 0 ? (
+                      programasList.map((p) => (
+                        <option key={p.id_programa} value={p.id_programa}>{p.nombre_programa}</option>
+                      ))
+                    ) : (
+                      <>
+                        <option value={1}>Programa 1</option>
+                        <option value={2}>Programa 2</option>
+                        <option value={3}>Programa 3</option>
+                      </>
+                    )}
                   </select>
                   <input 
                     type="text" 
@@ -468,7 +711,7 @@ export default function App() {
                   />
                   <input 
                     type="number" 
-                    placeholder="Año (e.g. 2026)" 
+                    placeholder="Año (ej. 2026)" 
                     value={newMeta.anio}
                     onChange={(e) => setNewMeta({ ...newMeta, anio: Number(e.target.value) })}
                     className="border p-2.5 text-sm rounded-lg" required
@@ -489,7 +732,7 @@ export default function App() {
                   />
                 </div>
                 <button type="submit" className="bg-blue-600 text-white text-sm font-medium px-4 py-2 rounded-lg hover:bg-blue-700">
-                  Guardar Meta en BD
+                  Guardar Meta
                 </button>
               </form>
 
@@ -503,17 +746,27 @@ export default function App() {
                       <th className="p-3">Año</th>
                       <th className="p-3">Ponderador</th>
                       <th className="p-3">Meta Esperada</th>
+                      <th className="p-3 text-right">Acciones</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {metas.map((m) => (
                       <tr key={m.id_meta} className="hover:bg-slate-50">
                         <td className="p-3 font-mono text-slate-500">{m.id_meta}</td>
-                        <td className="p-3 text-slate-600">{m.id_programa}</td>
+                        <td className="p-3 text-slate-600">{m.nombre_programa || m.id_programa}</td>
                         <td className="p-3 font-medium text-slate-800">{m.nombre_meta}</td>
                         <td className="p-3 text-slate-600">{m.anio}</td>
                         <td className="p-3 text-slate-600">{m.ponderador}%</td>
                         <td className="p-3 text-slate-600">{m.meta_esperada}%</td>
+                        <td className="p-3 text-right">
+                          <button
+                            onClick={() => handleDeleteMeta(m.id_meta, m.nombre_meta)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                            title="Eliminar meta (quedará registrado en auditoría)"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" /> Eliminar
+                          </button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -522,13 +775,21 @@ export default function App() {
             </div>
           )}
 
-          {currentTab === 'parametros' && (
+          {currentTab === 'parametros' && puedeEditar && (
             <div className="space-y-6">
-              <h2 className="text-xl font-bold text-slate-800">Parametrización Dinámica de Celdas REM</h2>
+              <div>
+                <h2 className="text-xl font-bold text-slate-800">Paso 2: Parametrización Dinámica de Celdas REM</h2>
+                <p className="text-xs text-slate-500">Indica en qué hoja y celda del archivo Excel REM se encuentra el dato numérico para calcular cada meta.</p>
+              </div>
+
+              <div className="bg-blue-50 border border-blue-200 p-3.5 rounded-xl text-xs text-blue-800 flex items-center gap-2.5">
+                <Info className="w-4 h-4 text-blue-600 flex-shrink-0" />
+                <span>Ejemplo: Si la planilla ministerial cambia de formato el próximo mes, basta con actualizar aquí la celda (ej. de <b>D24</b> a <b>E25</b>) sin modificar código.</span>
+              </div>
 
               <form onSubmit={handleCreateParam} className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
                 <h3 className="text-sm font-bold text-slate-700 uppercase flex items-center gap-2">
-                  <Plus className="w-4 h-4 text-blue-600" /> Asociar Celda Excel a Indicador
+                  <Plus className="w-4 h-4 text-blue-600" /> Asociar Celda Excel a Meta Sanitaria
                 </h3>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <select 
@@ -543,42 +804,42 @@ export default function App() {
                   </select>
                   <input 
                     type="text" 
-                    placeholder="Código Indicador (e.g. IND-01-NUM)" 
+                    placeholder="Código Indicador (ej. IND-01)" 
                     value={newParam.codigo_indicador}
                     onChange={(e) => setNewParam({ ...newParam, codigo_indicador: e.target.value })}
                     className="border p-2.5 text-sm rounded-lg" required
                   />
                   <input 
                     type="text" 
-                    placeholder="Código REM (e.g. REM-A01)" 
+                    placeholder="Código REM (ej. REM-A01)" 
                     value={newParam.rem_codigo}
                     onChange={(e) => setNewParam({ ...newParam, rem_codigo: e.target.value })}
                     className="border p-2.5 text-sm rounded-lg" required
                   />
                   <input 
                     type="text" 
-                    placeholder="Nombre Hoja Excel (e.g. Seccion_A)" 
+                    placeholder="Nombre Hoja Excel (ej. Seccion_A)" 
                     value={newParam.nombre_hoja}
                     onChange={(e) => setNewParam({ ...newParam, nombre_hoja: e.target.value })}
                     className="border p-2.5 text-sm rounded-lg" required
                   />
                   <input 
                     type="text" 
-                    placeholder="Celda (e.g. D24)" 
+                    placeholder="Celda Exacta (ej. D24)" 
                     value={newParam.celda_coordenada}
                     onChange={(e) => setNewParam({ ...newParam, celda_coordenada: e.target.value })}
                     className="border p-2.5 text-sm rounded-lg" required
                   />
                   <input 
                     type="text" 
-                    placeholder="Descripción" 
+                    placeholder="Descripción breve" 
                     value={newParam.descripcion}
                     onChange={(e) => setNewParam({ ...newParam, descripcion: e.target.value })}
                     className="border p-2.5 text-sm rounded-lg" required
                   />
                 </div>
                 <button type="submit" className="bg-blue-600 text-white text-sm font-medium px-4 py-2 rounded-lg hover:bg-blue-700">
-                  Guardar Parametrización en BD
+                  Guardar Parametrización
                 </button>
               </form>
 
@@ -591,6 +852,7 @@ export default function App() {
                       <th className="p-3">Código REM</th>
                       <th className="p-3">Hoja Excel</th>
                       <th className="p-3">Celda</th>
+                      <th className="p-3 text-right">Acciones</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -601,6 +863,15 @@ export default function App() {
                         <td className="p-3 text-slate-600">{p.rem_codigo}</td>
                         <td className="p-3 text-slate-600">{p.nombre_hoja}</td>
                         <td className="p-3 font-mono bg-slate-50 text-slate-700 font-bold">{p.celda_coordenada}</td>
+                        <td className="p-3 text-right">
+                          <button
+                            onClick={() => handleDeleteParam(p.id_parametro, p.codigo_indicador)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                            title="Eliminar parámetro (quedará registrado en auditoría)"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" /> Eliminar
+                          </button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -609,9 +880,12 @@ export default function App() {
             </div>
           )}
 
-          {currentTab === 'rem' && (
+          {currentTab === 'rem' && puedeEditar && (
             <div className="space-y-6 max-w-xl mx-auto">
-              <h2 className="text-xl font-bold text-slate-800 text-center">Ingesta y Procesamiento de Planillas REM</h2>
+              <div className="text-center">
+                <h2 className="text-xl font-bold text-slate-800">Paso 3: Carga y Procesamiento REM</h2>
+                <p className="text-xs text-slate-500">Sube la planilla Excel oficial (.xlsx). El sistema leerá las celdas parametrizadas y actualizará los gráficos.</p>
+              </div>
 
               <form onSubmit={handleUploadREM} className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-5">
                 <div className="grid grid-cols-2 gap-4">
@@ -637,10 +911,10 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="border-2 border-dashed border-slate-300 rounded-xl p-8 text-center space-y-2 bg-slate-50 hover:bg-slate-100 transition-colors cursor-pointer">
+                <div className="border-2 border-dashed border-slate-300 rounded-xl p-8 text-center space-y-2 bg-slate-50 hover:bg-slate-100 transition-colors">
                   <Upload className="w-8 h-8 text-slate-400 mx-auto" />
-                  <p className="text-sm font-medium text-slate-700">Selecciona tu archivo Excel (.xlsx)</p>
-                  <p className="text-xs text-slate-400">Archivos soportados: .xlsx (Máximo 25 MB)</p>
+                  <p className="text-sm font-medium text-slate-700">Selecciona tu planilla Excel (.xlsx)</p>
+                  <p className="text-xs text-slate-400">Verificación de integridad SHA-256 automática (Máx. 25 MB)</p>
                   <input 
                     type="file" 
                     accept=".xlsx" 
@@ -648,8 +922,8 @@ export default function App() {
                     className="hidden" 
                     id="rem-upload-input"
                   />
-                  <label htmlFor="rem-upload-input" className="inline-block mt-2 bg-slate-200 text-slate-700 text-xs px-3 py-1.5 rounded-lg cursor-pointer hover:bg-slate-300">
-                    {remFile ? remFile.name : 'Seleccionar Archivo'}
+                  <label htmlFor="rem-upload-input" className="inline-block mt-2 bg-slate-200 text-slate-700 text-xs font-medium px-4 py-2 rounded-lg cursor-pointer hover:bg-slate-300">
+                    {remFile ? remFile.name : 'Examinar Equipo...'}
                   </label>
                 </div>
 
@@ -657,13 +931,13 @@ export default function App() {
                   type="submit" 
                   className="w-full bg-blue-600 text-white font-medium py-2.5 rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
                 >
-                  <FileSpreadsheet className="w-4 h-4" /> Procesar e Ingestar REM
+                  <FileSpreadsheet className="w-4 h-4" /> Procesar Planilla REM
                 </button>
               </form>
 
               {uploadStatus && (
-                <div className={`p-4 border rounded-xl text-xs font-medium flex items-center gap-2 ${uploadStatus.ok ? 'bg-green-50 border-green-200 text-green-800' : 'bg-red-50 border-red-200 text-red-800'}`}>
-                  {uploadStatus.ok ? <CheckCircle2 className="w-5 h-5 text-green-600 flex-shrink-0" /> : <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0" />}
+                <div className={`p-4 border rounded-xl text-xs font-medium flex items-center gap-2 ${uploadStatus.ok ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-800'}`}>
+                  {uploadStatus.ok ? <CheckCircle2 className="w-5 h-5 text-emerald-600 flex-shrink-0" /> : <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0" />}
                   <span>{uploadStatus.msg}</span>
                 </div>
               )}
@@ -672,38 +946,169 @@ export default function App() {
 
           {currentTab === 'auditoria' && (
             <div className="space-y-6">
-              <h2 className="text-xl font-bold text-slate-800">Registro Inmutable de Auditoría (PostgreSQL)</h2>
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-xl font-bold text-slate-800">Registro Inmutable de Auditoría y Trazabilidad</h2>
+                  <p className="text-xs text-slate-500">Historial completo de quién creó, modificó, cargó o eliminó información en el sistema, con fecha y hora exacta.</p>
+                </div>
+                <button
+                  onClick={handleExportAuditoriaCSV}
+                  className="bg-slate-800 hover:bg-slate-900 text-white text-xs font-medium px-4 py-2.5 rounded-lg flex items-center gap-2 transition-colors shadow-sm"
+                >
+                  <Download className="w-4 h-4" /> Exportar Auditoría CSV
+                </button>
+              </div>
+
               <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
                 <table className="w-full text-left border-collapse text-sm">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold text-xs uppercase">
                       <th className="p-3">ID</th>
-                      <th className="p-3">Usuario ID</th>
-                      <th className="p-3">Acción</th>
-                      <th className="p-3">Tabla Modificada</th>
-                      <th className="p-3">ID Afectado</th>
-                      <th className="p-3">Fecha / Hora</th>
+                      <th className="p-3">Responsable</th>
+                      <th className="p-3">Acción Realizada</th>
+                      <th className="p-3">Detalle del Registro</th>
+                      <th className="p-3">Fecha y Hora</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {auditoria.length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="p-6 text-center text-slate-400 text-xs">
-                          Aún no hay eventos registrados. Crea un parámetro o carga un Excel REM para generar auditoría real.
+                        <td colSpan={5} className="p-6 text-center text-slate-400 text-xs">
+                          Aún no hay eventos registrados.
                         </td>
                       </tr>
                     ) : (
-                      auditoria.map((a) => (
-                        <tr key={a.id_auditoria} className="hover:bg-slate-50">
-                          <td className="p-3 font-mono text-slate-500">{a.id_auditoria}</td>
-                          <td className="p-3 font-mono text-slate-600">{a.id_usuario}</td>
-                          <td className="p-3 font-bold text-blue-600">{a.accion}</td>
-                          <td className="p-3 text-slate-700">{a.tabla_modificada}</td>
-                          <td className="p-3 text-slate-700">{a.id_registro_afectado}</td>
-                          <td className="p-3 text-xs text-slate-500">{a.fecha_hora}</td>
-                        </tr>
-                      ))
+                      auditoria.map((a) => {
+                        const esEliminacion = a.accion.includes('ELIMINACION');
+                        return (
+                          <tr key={a.id_auditoria} className="hover:bg-slate-50">
+                            <td className="p-3 font-mono text-slate-500">{a.id_auditoria}</td>
+                            <td className="p-3">
+                              <div className="font-medium text-slate-800">{a.responsable_nombre}</div>
+                              <div className="text-xs text-slate-400">{a.responsable_email}</div>
+                            </td>
+                            <td className="p-3">
+                              <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${esEliminacion ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'}`}>
+                                {a.accion}
+                              </span>
+                            </td>
+                            <td className="p-3 text-xs text-slate-600 max-w-md truncate" title={a.detalle}>
+                              {a.detalle || `${a.tabla_modificada} #${a.id_registro_afectado}`}
+                            </td>
+                            <td className="p-3 font-mono text-xs text-slate-500">{a.fecha_hora}</td>
+                          </tr>
+                        );
+                      })
                     )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {currentTab === 'usuarios' && esAdmin && (
+            <div className="space-y-6">
+              <div>
+                <h2 className="text-xl font-bold text-slate-800">Administración de Usuarios y Perfiles (RBAC)</h2>
+                <p className="text-xs text-slate-500">Gestiona los accesos institucionales de Dirección, Subdirecciones y Jefes de Programa.</p>
+              </div>
+
+              <form onSubmit={handleCreateUser} className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+                <h3 className="text-sm font-bold text-slate-700 uppercase flex items-center gap-2">
+                  <Plus className="w-4 h-4 text-blue-600" /> Registrar Nuevo Usuario Institucional
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <input 
+                    type="text" 
+                    placeholder="RUT (ej. 12.345.678-9)" 
+                    value={newUser.rut}
+                    onChange={(e) => setNewUser({ ...newUser, rut: e.target.value })}
+                    className="border p-2.5 text-sm rounded-lg" required
+                  />
+                  <input 
+                    type="text" 
+                    placeholder="Nombre Completo" 
+                    value={newUser.nombre}
+                    onChange={(e) => setNewUser({ ...newUser, nombre: e.target.value })}
+                    className="border p-2.5 text-sm rounded-lg" required
+                  />
+                  <input 
+                    type="email" 
+                    placeholder="Correo Institucional (@cesfam.cl)" 
+                    value={newUser.email}
+                    onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
+                    className="border p-2.5 text-sm rounded-lg" required
+                  />
+                  <input 
+                    type="password" 
+                    placeholder="Contraseña (mín. 6 caracteres)" 
+                    value={newUser.password}
+                    onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
+                    className="border p-2.5 text-sm rounded-lg" required
+                  />
+                  <select
+                    value={newUser.id_rol}
+                    onChange={(e) => setNewUser({ ...newUser, id_rol: Number(e.target.value) })}
+                    className="border p-2.5 text-sm rounded-lg"
+                  >
+                    {rolesList.map((r) => (
+                      <option key={r.id_rol} value={r.id_rol}>{r.nombre_rol}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={newUser.id_programa}
+                    onChange={(e) => setNewUser({ ...newUser, id_programa: Number(e.target.value) })}
+                    className="border p-2.5 text-sm rounded-lg"
+                  >
+                    <option value={0}>Acceso Global / Transversal</option>
+                    {programasList.map((p) => (
+                      <option key={p.id_programa} value={p.id_programa}>Solo {p.nombre_programa}</option>
+                    ))}
+                  </select>
+                </div>
+                <button type="submit" className="bg-blue-600 text-white text-sm font-medium px-4 py-2 rounded-lg hover:bg-blue-700">
+                  Crear Cuenta Institucional
+                </button>
+              </form>
+
+              <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                <table className="w-full text-left border-collapse text-sm">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold text-xs uppercase">
+                      <th className="p-3">RUT</th>
+                      <th className="p-3">Nombre</th>
+                      <th className="p-3">Correo</th>
+                      <th className="p-3">Rol Institucional</th>
+                      <th className="p-3">Programa</th>
+                      <th className="p-3">Estado</th>
+                      <th className="p-3 text-right">Control</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {usuarios.map((u) => (
+                      <tr key={u.id_usuario} className="hover:bg-slate-50">
+                        <td className="p-3 font-mono text-xs text-slate-500">{u.rut}</td>
+                        <td className="p-3 font-medium text-slate-800">{u.nombre}</td>
+                        <td className="p-3 text-slate-600">{u.email}</td>
+                        <td className="p-3">
+                          <span className="text-xs font-semibold px-2.5 py-1 bg-blue-50 text-blue-700 rounded-full">{u.nombre_rol}</span>
+                        </td>
+                        <td className="p-3 text-xs text-slate-500">{u.nombre_programa}</td>
+                        <td className="p-3">
+                          <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${u.activo ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+                            {u.activo ? 'Activo' : 'Inactivo'}
+                          </span>
+                        </td>
+                        <td className="p-3 text-right">
+                          <button
+                            onClick={() => handleToggleUserStatus(u.id_usuario)}
+                            className="text-xs font-medium text-slate-600 hover:text-blue-600 underline"
+                          >
+                            {u.activo ? 'Desactivar' : 'Activar'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               </div>
